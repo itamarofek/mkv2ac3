@@ -14,12 +14,29 @@ import shutil
 import hashlib
 import textwrap
 import errno
+from distutils import spawn
 
-version = "1.1"
+version = ".1"
 
-sab = False
-nzbget = False
+mkvtools = {'mkvinfo': None, 'mkvmerg': None, 'mkvextract': None}
+mkvmerge_bin = None
 
+ffmpegtools = {'ffmpegt': None}
+
+def set_tools_path(tools, path=None):
+    for key in tools:
+        mkvtools[key] = spawn.find_executable(
+                os.path.join(path,key) if path else key)
+        if not mkvtools[key]:
+            raise NameError('Key can not be found')
+
+
+
+def mkvinfo():
+    pass
+
+def mkvmerge():
+    pass
 
 def load_config():
     configFilename = os.path.join(os.path.dirname(sys.argv[0]), "mkv2ac3.conf")
@@ -179,53 +196,15 @@ def main():
     args = set_defaults(parser)
 
     args = set_prog_options(parser)
+ 
 
-
-def winexe(program):
-    if sys.platform == "win32" and not program.endswith(".exe"):
-        program += ".exe"
-    return program
+    global mkvtools
+    global ffmpegtools
+    
+    set_tools_path(mkvtools, args.mkvtoolnixpath)
+    set_tools_path(ffmpegtools, args.ffmpegpath)
 
 # set ffmpeg and mkvtoolnix paths
-if args.mkvtoolnixpath:
-    mkvinfo = os.path.join(args.mkvtoolnixpath, "mkvinfo")
-    mkvinfo = winexe(mkvinfo)
-    mkvmerge = os.path.join(args.mkvtoolnixpath, "mkvmerge")
-    mkvmerge = winexe(mkvmerge)
-    mkvextract = os.path.join(args.mkvtoolnixpath, "mkvextract")
-    mkvextract = winexe(mkvextract)
-if not args.mkvtoolnixpath or not os.path.exists(mkvinfo):
-    mkvinfo = "mkvinfo"
-if not args.mkvtoolnixpath or not os.path.exists(mkvmerge):
-    mkvmerge = "mkvmerge"
-if not args.mkvtoolnixpath or not os.path.exists(mkvextract):
-    mkvextract = "mkvextract"
-   
-if args.ffmpegpath:
-    ffmpeg = os.path.join(args.ffmpegpath, "ffmpeg")
-    ffmpeg = winexe(ffmpeg)
-if not args.ffmpegpath or not os.path.exists(ffmpeg):
-    ffmpeg = "ffmpeg"
-
-
-# check paths
-def which(program):
-    if sys.platform == "win32" and not program.endswith(".exe"):
-        program += ".exe"
-    def is_exe(fpath):
-        return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
-
-    fpath = os.path.split(program)[0]
-    if fpath:
-        if is_exe(program):
-            return program
-    else:
-        for path in os.environ["PATH"].split(os.pathsep):
-            exe_file = os.path.join(path, program)
-            if is_exe(exe_file):
-                return exe_file
-
-    return None
 
 missingprereqs = False
 missinglist = []
