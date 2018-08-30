@@ -25,10 +25,15 @@ mkvmerge_bin = None
 
 ffmpegtools = {'ffmpeg': None}
 
+def static_var(varname, value):
+    def decorate(func):
+        setattr(func, varname, value)
+        return func
+    return decorate
 
 def setup_logger(level=0):
-    mapping = {0:logging.CRITICAL, 1:logging.ERROR,
-               2:logging.WARNING, 3: logging.INFO, 
+    mapping = {0: logging.CRITICAL, 1: logging.ERROR,
+               2: logging.WARNING, 3: logging.INFO,
                4: logging.DEBUG}
     formatter = colorlog.ColoredFormatter(
         "%(log_color)s%(levelname)-8s%(reset)s %(log_color)s%(message)s",
@@ -48,7 +53,7 @@ def setup_logger(level=0):
     handler = colorlog.StreamHandler()
     handler.setFormatter(formatter)
 
-    logger = colorlog.getLogger('mkv2ac3')
+    logger = colorlog.getLogger(__file__)
     logger.addHandler(handler)
     logger.setLevel(mapping[level])
 
@@ -71,12 +76,23 @@ def call_prog(prog, args_list):
         output = output[0].strip()
     return output
 
-
-def mkvinfo():
+@static_var('app', mkvtools['mkvinfo'])
+def mkvinfo(media,*args):
     pass
 
-def mkvmerge():
+@static_var('app', mkvtools['mkvmerge'])
+def mkvmerge(media,*args):
     pass
+
+@static_var('app', ffmpegtools['ffmpeg'])
+def ffmpeg(media, *args):
+    pass
+
+@static_var('app', ffmpegtools['mkvextract'])
+def mkvextract(media, *args):
+    pass
+
+
 
 def load_config():
     configFilename = os.path.join(os.path.dirname(sys.argv[0]), "mkv2ac3.conf")
@@ -91,7 +107,7 @@ def load_config():
     return None
 
 def set_prog_options(parser):
-    parser.add_argument('fileordir', 
+    parser.add_argument('fileordir',
             metavar='FileOrDirectory',
             nargs='+',
             help='a file or directory (wildcards may be used)')
@@ -194,7 +210,7 @@ def set_prog_options(parser):
             metavar="WORK_DIR",
             help="Specify alternate temporary working directory")
 
-    parser.add_argument("-v", "--verbose", 
+    parser.add_argument("-v", "--verbose",
             help="Turn on verbose output."
             " Use more v's for more verbosity."
             " -v will output what it is doing."
@@ -236,11 +252,10 @@ def main():
     args = set_defaults(parser)
 
     args = set_prog_options(parser)
- 
 
     global mkvtools
     global ffmpegtools
-    
+
     set_tools_path(mkvtools, args.mkvtoolnixpath)
     set_tools_path(ffmpegtools, args.ffmpegpath)
 
@@ -269,7 +284,36 @@ def getduration(time):
     totalms = (int(ms) + (int(s) * 100) +
                (int(m) * 100 * 60) + (int(h) * 100 * 60 * 60))
     return totalms
-   
+
+class AudioConvertor(object):
+    def __init__(media, target, work_dir, downmixing=False):
+        self.media = media
+        self.target = target
+        self.work_dir = work_dir
+        self.stereo = downmixing
+        pass
+
+    def process_media():
+        pass
+
+    def extrct_stream():
+        pass
+
+    def remux_media():
+        pass
+
+    def convert_audio():
+        pass
+
+    def mk_processing_dir():
+        if not os.path.exists(self.work_dir):
+            os.makedirs(self.work_dir)
+        else:
+            tempdir = tempfile.mkdtemp()
+            tempdir = os.path.join(tempdir, "mkvdts2ac3")
+        pass
+
+
 def runcommand(title, cmdlist):
     if args.debug:
         raw_input("Press Enter to continue...")
@@ -282,7 +326,7 @@ def runcommand(title, cmdlist):
                 cmdstr += e + ' '
             print
             print "    Running command:"
-            print textwrap.fill(cmdstr.rstrip(), initial_indent='      ', subsequent_indent='      ')
+            print textwrap.fill(cmdstrrstrip(), initial_indent='      ', subsequent_indent='      ')
     if not args.test:
         if args.verbose >= 3:
             subprocess.call(cmdlist)
