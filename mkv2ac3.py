@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import shlex
 import subprocess
 import time
 import glob
@@ -10,10 +11,11 @@ import re
 import tempfile
 import sys
 import ConfigParser
-import shutil
+#import shutil
 import hashlib
 import textwrap
 import errno
+import colorlog
 from distutils import spawn
 
 version = ".1"
@@ -21,15 +23,53 @@ version = ".1"
 mkvtools = {'mkvinfo': None, 'mkvmerg': None, 'mkvextract': None}
 mkvmerge_bin = None
 
-ffmpegtools = {'ffmpegt': None}
+ffmpegtools = {'ffmpeg': None}
+
+
+def setup_logger(level=0):
+    mapping = {0:logging.CRITICAL, 1:logging.ERROR,
+               2:logging.WARNING, 3: logging.INFO, 
+               4: logging.DEBUG}
+    formatter = colorlog.ColoredFormatter(
+        "%(log_color)s%(levelname)-8s%(reset)s %(log_color)s%(message)s",
+        datefmt=None,
+        reset=True,
+        log_colors={
+            'DEBUG':    'cyan',
+            'INFO':     'green',
+            'WARNING':  'yellow',
+            'ERROR':    'red',
+            'CRITICAL': 'red,bg_white',
+        },
+        secondary_log_colors={},
+        style='%'
+    )
+
+    handler = colorlog.StreamHandler()
+    handler.setFormatter(formatter)
+
+    logger = colorlog.getLogger('mkv2ac3')
+    logger.addHandler(handler)
+    logger.setLevel(mapping[level])
 
 def set_tools_path(tools, path=None):
     for key in tools:
         mkvtools[key] = spawn.find_executable(
                 os.path.join(path,key) if path else key)
         if not mkvtools[key]:
+            logger.
             raise NameError('Key can not be found')
 
+
+
+def call_prog(prog, args_list):
+    cmd = [prog] + args_list
+    output = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()
+    if len(output) == 0 or output[0] is None:
+        output = ""
+    else:
+        output = output[0].strip()
+    return output
 
 
 def mkvinfo():
@@ -204,48 +244,10 @@ def main():
     set_tools_path(mkvtools, args.mkvtoolnixpath)
     set_tools_path(ffmpegtools, args.ffmpegpath)
 
-# set ffmpeg and mkvtoolnix paths
+    if args.test or args.debug:
+        args.verbose = max(args.verbose, 2)
 
-missingprereqs = False
-missinglist = []
-if not which(mkvextract):
-    missingprereqs = True
-    missinglist.append("mkvextract")
-if not which(mkvinfo):
-    missingprereqs = True
-    missinglist.append("mkvinfo")
-if not which(mkvmerge):
-    missingprereqs = True
-    missinglist.append("mkvmerge")
-if not which(ffmpeg):
-    missingprereqs = True
-    missinglist.append("ffmpeg")
-if missingprereqs:
-    sys.stdout.write("You are missing the following prerequisite tools: ")
-    for tool in missinglist:
-        sys.stdout.write(tool + " ")
-    if not args.mkvtoolnixpath and not args.ffmpegpath:
-        print "\nYou can use --mkvtoolnixpath and --ffmpegpath to specify the path"
-    else:
-        print   
-    sys.exit(1)
 
-if not args.verbose:
-    args.verbose = 0
-
-if args.verbose < 2 and (args.test or args.debug):
-    args.verbose = 2
-
-if sab:
-    args.fileordir = [args.fileordir[0]]
-    args.verbose = 3
-
-if args.debug and args.verbose == 0:
-    args.verbose = 1
-
-def doprint(mystr, v=0):
-    if args.verbose >= v:
-        sys.stdout.write(mystr)
 
 def silentremove(filename):
     try:
@@ -254,22 +256,18 @@ def silentremove(filename):
         if e.errno != errno.ENOENT: # errno.ENOENT = no such file or directory
             raise # re-raise exception if a different error occured
 
+
 def elapsedstr(starttime):
     elapsed = (time.time() - starttime)
     minutes = int(elapsed / 60)
-    mplural = 's'
-    if minutes == 1:
-        mplural = ''
     seconds = int(elapsed) % 60
-    splural = 's'
-    if seconds == 1:
-        splural = ''
-    return str(minutes) + " minute" + mplural + " " + str(seconds) + " second" + splural
+    return ("%s min:%s sec" %(minutes, seconds))
 
 def getduration(time):
     (hms, ms) = time.split('.')
     (h, m, s) = hms.split(':')
-    totalms = int(ms) + (int(s) * 100) + (int(m) * 100 * 60) + (int(h) * 100 * 60 * 60)
+    totalms = (int(ms) + (int(s) * 100) +
+               (int(m) * 100 * 60) + (int(h) * 100 * 60 * 60))
     return totalms
    
 def runcommand(title, cmdlist):
