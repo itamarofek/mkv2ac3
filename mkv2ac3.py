@@ -15,12 +15,14 @@ import ConfigParser
 import hashlib
 import textwrap
 import errno
+import logging
 import colorlog
 from distutils import spawn
 
 version = ".1"
 
-mkvtools = {'mkvinfo': None, 'mkvmerg': None, 'mkvextract': None}
+supported_formats = ['AAC', 'E-AC-3', 'DTS' ]
+mkvtools = {'mkvinfo': None, 'mkvmerge': None, 'mkvextract': None}
 mkvmerge_bin = None
 
 ffmpegtools = {'ffmpeg': None}
@@ -50,47 +52,58 @@ def setup_logger(level=0):
         style='%'
     )
 
-    handler = colorlog.StreamHandler()
+    handler = logging.StreamHandler()
     handler.setFormatter(formatter)
 
     logger = colorlog.getLogger(__file__)
     logger.addHandler(handler)
-    logger.setLevel(mapping[level])
+    logger.setLevel(mapping[level+1])
+
+
+def get_logger():
+    return colorlog.getLogger(__file__)
 
 def set_tools_path(tools, path=None):
     for key in tools:
-        mkvtools[key] = spawn.find_executable(
+        tools[key] = spawn.find_executable(
                 os.path.join(path,key) if path else key)
-        if not mkvtools[key]:
-            logger.
+        if not tools[key]:
+            logger.error("clould not find %s executable" % key)
             raise NameError('Key can not be found')
 
 
+currentFuncName = lambda n=0: sys._getframe(n + 1).f_code.co_name
 
 def call_prog(prog, args_list):
     cmd = [prog] + args_list
+    get_logger().debug("call: %(cmd)s",{'cmd':cmd})
     output = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()
     if len(output) == 0 or output[0] is None:
         output = ""
     else:
-        output = output[0].strip()
+        output = output[0].splitlines()
     return output
 
-@static_var('app', mkvtools['mkvinfo'])
-def mkvinfo(media,*args):
-    pass
+def mkvinfo(media,*arguments):
+    arg_list = ["--ui-language", "en_US", media]
+    if arguments:
+        arg_list = list(arguments) + arg_list
+    return call_prog(mkvtools[currentFuncName()],arg_list)  
 
-@static_var('app', mkvtools['mkvmerge'])
-def mkvmerge(media,*args):
-    pass
 
-@static_var('app', ffmpegtools['ffmpeg'])
+def mkvmerge(media, *arguments):
+    arg_list = ['-i', media] + [item for item in arguments]
+    return  call_prog(mkvtools[currentFuncName()], arg_list)  
+
+
 def ffmpeg(media, *args):
     pass
 
-@static_var('app', ffmpegtools['mkvextract'])
 def mkvextract(media, *args):
-    pass
+    arg_list = list(args)
+    arg_list = [arg_list[0], media] + arg_list[1:] 
+    return  call_prog(mkvtools[currentFuncName()], arg_list)  
+
 
 
 
@@ -117,6 +130,12 @@ def set_prog_options(parser):
             metavar="TITLE",
             help="Custom AC3 track title")
 
+
+#    parser.add_argument(
+#            "-i", "--input",
+#            metavar="INPUT",
+#            help="input media file")
+
     parser.add_argument(
             "-d", "--default",
             help="Mark AC3 track as default", action="store_true")
@@ -132,7 +151,7 @@ def set_prog_options(parser):
             " This overrides '-n' and '-d' arguments")
 
     parser.add_argument(
-            "-f", "--force", action="store_true")
+            "-f", "--force", action="store_true",
             help="Force processing when AC3 track is detected")
 
     parser.add_argument(
@@ -163,8 +182,6 @@ def set_prog_options(parser):
             "--no-subtitles",
             help="Remove subtitles",
             action="store_true")
-
-
 
     parser.add_argument(
             "-o", "--overwrite",
@@ -198,8 +215,8 @@ def set_prog_options(parser):
     parser.add_argument(
             "-t", "--track",
             metavar="TRACKID",
-            help="Specify alternate track.
-            If it is not a supported audio track,"
+            help="Specify alternate track."
+            " If it is not a supported audio track,"
             " it will default to the first supported audio track found")
 
     parser.add_argument(
@@ -234,7 +251,6 @@ def set_prog_options(parser):
     return args
 
 def main():
-    supported_formats = ['aac', 'eac3', 'dts' ]
     parser = argparse.ArgumentParser(
             description='convert mkv video files audio %s to ac3' %
             supported_formats)
@@ -249,8 +265,6 @@ def main():
     if cfg:
         parser.set_defaults(**cfg)
 
-    args = set_defaults(parser)
-
     args = set_prog_options(parser)
 
     global mkvtools
@@ -261,8 +275,15 @@ def main():
 
     if args.test or args.debug:
         args.verbose = max(args.verbose, 2)
+    setup_logger(args.verbose)
 
+    get_logger().info(" media is %(media)s", {'media': args.fileordir})
+    
+    convert=AudioConvertor(args.fileordir[0], ".")
 
+    convert.process_media()
+
+    
 
 def silentremove(filename):
     try:
@@ -285,33 +306,116 @@ def getduration(time):
                (int(m) * 100 * 60) + (int(h) * 100 * 60 * 60))
     return totalms
 
+class MediaInfo(object):
+    def __init__(self,media):
+        self.source = media
+        self.info = dict()
+        
+
+    def analyse(self):
+        output = mkvmerge(self.source)
+        for line in output:
+            entry = re.split('Track ID ([0-9]+)\: (.*) \((.*)/(.*)\)', line)
+            if not entry or len(entry) != 6:
+                continue
+            self.info[entry[1]] = {'type' :entry[2],
+                                   'codec_info': entry[3],
+                                   'codec': entry[4]}
+
+            get_logger().debug(
+                         "parsed elementry stream %(id)s:"
+                         "%(type)s, %(codec)s, %(codec_info)s",
+                         {'id': entry[1], 'type': entry[2],
+                          'codec': entry[4], 'codec_info': entry[3] })
+        return self.info
+
+    def get_source(self):
+        return self.source
+
+    def get_info(self):
+        return self.info
+
+
 class AudioConvertor(object):
-    def __init__(media, target, work_dir, downmixing=False):
-        self.media = media
+
+    def __init__(self, media, work_dir=".", target=None, downmixing=False):
+        self.media = MediaInfo(media)
+        self.src_dir = None
+        self.src_file = None
+        self.asset_desc = None
         self.target = target
         self.work_dir = work_dir
         self.stereo = downmixing
+        self.es =  None
+        self.tmpaudio = None
+        self.src_dir, self.src_file = os.path.split(media)
+        self.asset_desc = os.path.splitext(self.src_file)[0]
+  
+    def process_audio(self):
+        info = mkvinfo(self.media.source)
+        trackinfo = {}
+        line_count = 0
+        record_found = False
+        for line in info:
+            if "Track number: %s" % (int(self.es) + 1) in line:
+                record_found = True
+                continue
+            if not record_found:
+                continue
+            if 'A track' in line:
+                break
+            record = re.split('\|[\ ]+\+ (.*)\:(.*)', line)
+            if len(record) > 3:
+                trackinfo[record[1]] = record[2].strip()
+
+
+        get_logger().debug("track: %(id)s, %(info)s",
+                             dict(id=self.es,info=trackinfo))
+        return trackinfo
+
+        
+
+    def process_media(self):
+        info = self.media.analyse()
+        for k,v in info.iteritems():
+            if 'audio' in v['type'] and v['codec'] in supported_formats:
+                self.es = k
+                get_logger().info("found stream %(id)s, %(codec)s",
+                                  {'id': k, 'codec': v['codec'] }) 
+                break
+        stream_info = self.process_audio()
+        self.extract_stream(self.es)
+        self.extract_timecode(self.es)
+
+
+    def extract_stream(self, stream_id):
+        codec = self.media.get_info()[stream_id]['codec']
+        tempfile = "%s_track:%s.%s" %(self.asset_desc, stream_id, codec)
+        self.tmpaudio = os.path.join(self.work_dir,tempfile)
+        result = mkvextract(self.media.source, "tracks",
+                            stream_id + ':' + self.tmpaudio)
+
+    def extract_timecode(self, stream_id):
+        tempfile = "%s_track:%s.%s" %(self.asset_desc, stream_id, 'tc')
+        self.tmptc = os.path.join(self.work_dir,tempfile)
+
+        result = mkvextract(self.media.source, "timecodes_v2",
+                            stream_id + ':' + self.tmptc)
+
+
+    def remux_media(self):
         pass
 
-    def process_media():
+    def convert_audio(self):
         pass
+        
 
-    def extrct_stream():
-        pass
-
-    def remux_media():
-        pass
-
-    def convert_audio():
-        pass
-
-    def mk_processing_dir():
+    def mk_processing_dir(self):
         if not os.path.exists(self.work_dir):
             os.makedirs(self.work_dir)
         else:
             tempdir = tempfile.mkdtemp()
-            tempdir = os.path.join(tempdir, "mkvdts2ac3")
-        pass
+            tempdir = os.path.join(tempdir, "mkv2ac3")
 
 
 def runcommand(title, cmdlist):
@@ -382,22 +486,6 @@ def runcommand(title, cmdlist):
         else:
             subprocess.call(cmdlist, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-def find_mount_point(path):
-    path = os.path.abspath(path)
-    while not os.path.ismount(path):
-        path = os.path.dirname(path)
-    return path
-
-def getmd5(fname, block_size=2**12):
-    md5 = hashlib.md5()
-    with open(fname, 'rb') as f:
-        while True:
-            data = f.read(block_size)
-            if not data:
-                break
-            md5.update(data)
-        doprint(fname + ": " + md5.hexdigest() + "\n", 3)
-    return md5.hexdigest()
 
 def check_md5tree(orig, dest):
     rt = True
@@ -416,455 +504,6 @@ def check_md5tree(orig, dest):
                     rt = False
     return rt
 
-def process(ford):
-    if os.path.isdir(ford):
-        doprint("    Processing dir:  " + ford + "\n", 3)
-        if args.recursive:
-            for f in os.listdir(ford):
-                process(os.path.join(ford, f))
-    else:
-        doprint("    Processing file: " + ford + "\n", 3)
-        # check if file is an mkv file
-        child = subprocess.Popen([mkvmerge, "-i", ford], stdout=subprocess.PIPE)
-        child.communicate()[0]
-        if child.returncode == 0:
-            starttime = time.time()
-           
-            # set up temp dir
-            tempdir = False
-            if args.wd:
-                tempdir = args.wd
-                if not os.path.exists(tempdir):
-                    os.makedirs(tempdir)
-            else:
-                tempdir = tempfile.mkdtemp()
-                tempdir = os.path.join(tempdir, "mkvdts2ac3")
-               
-            (dirName, fileName) = os.path.split(ford)
-            fileBaseName = os.path.splitext(fileName)[0]
-           
-            doprint("filename: " + fileName + "\n", 1)
-
-            newmkvfile = fileBaseName + '.mkv'
-            tempnewmkvfile = os.path.join(tempdir, newmkvfile)
-            adjacentmkvfile = os.path.join(dirName, fileBaseName + '.new.mkv')
-            mp4file = os.path.join(dirName, fileBaseName + '.mp4')
-            files = []
-            if not args.external and not args.mp4:
-                files.append(fileName)
-           
-            # get dts track id and video track id
-            output = subprocess.check_output([mkvmerge, "-i", ford])
-            lines = output.split("\n")
-            altdtstrackid = False
-            videotrackid = False
-            alreadygotac3 = False
-            audiotracks = []
-            dtstracks = []
-            for line in lines:
-                linelist = line.split(' ')
-                trackid = False
-                if len(linelist) > 2:
-                    trackid = linelist[2]
-                    linelist = trackid.split(':')
-                    trackid = linelist[0]
-                if ' audio (' in line:
-                    audiotracks.append(trackid)
-                if ' audio (A_DTS)' in line or ' audio (DTS' in line:
-                    dtstracks.append(trackid)
-                elif ' video (' in line:
-                    videotrackid = trackid
-                elif ' audio (A_AC3)' in line or ' audio (AC3' in line:
-                    alreadygotac3 = True
-                if args.track:
-                    matchObj = re.match( r'Track ID ' + args.track + r': audio \(A?_?DTS', line)
-                    if matchObj:
-                        altdtstrackid = args.track
-            if altdtstrackid:
-                dtstracks[:] = []
-                dtstracks.append(altdtstrackid)
-           
-            if not dtstracks:
-                doprint("  No DTS tracks found\n", 1)
-            elif alreadygotac3 and not args.force:
-                doprint("  Already has AC3 track\n", 1)
-            else:
-                if not args.all_tracks:
-                    dtstracks = dtstracks[0:1]
-
-                # 3 jobs per DTS track (Extract DTS, Extract timecodes, Transcode)
-                totaljobs = (3 * len(dtstracks))
-                # 1 Remux+ 1
-                if not args.external:
-                    totaljobs += 1
-                if args.aac:
-                    # 1 extra transcode per DTS track
-                    totaljobs += len(dtstracks)
-                if args.mp4:
-                    # Convert mkv -> mp4
-                    totaljobs += 1
-                jobnum = 1
-
-                dtsinfo = dict()
-                for dtstrackid in dtstracks:
-                    dtsfile = fileBaseName + dtstrackid + '.dts'
-                    tempdtsfile = os.path.join(tempdir, dtsfile)
-                    ac3file = fileBaseName + dtstrackid + '.ac3'
-                    tempac3file = os.path.join(tempdir, ac3file)
-                    aacfile = fileBaseName + dtstrackid + '.aac'
-                    tempaacfile = os.path.join(tempdir, aacfile)
-                    tcfile = fileBaseName + dtstrackid + '.tc'
-                    temptcfile = os.path.join(tempdir, tcfile)
-
-                    # get dtstrack info
-                    output = subprocess.check_output([mkvinfo, "--ui-language", "en_US", ford])
-                    lines = output.split("\n")
-                    dtstrackinfo = []
-                    startcount = 0
-                    for line in lines:
-                        match = re.search(r'^\|( *)\+', line)
-                        linespaces = startcount
-                        if match:
-                            linespaces = len(match.group(1))
-                        if startcount == 0:
-                            if "track ID for mkvmerge & mkvextract:" in line:
-                                if "track ID for mkvmerge & mkvextract: " + dtstrackid in line:
-                                    startcount = linespaces
-                            elif "+ Track number: " + dtstrackid in line:
-                                startcount = linespaces
-                        if linespaces < startcount:
-                            break
-                        if startcount != 0:
-                            dtstrackinfo.append(line)
-                   
-                    # get dts language
-                    dtslang = "eng"
-                    for line in dtstrackinfo:
-                        if "Language" in line:
-                            dtslang = line.split()[-1]
-                   
-                    # get ac3 track name
-                    ac3name = False
-                    if args.custom:
-                        ac3name = args.custom
-                    else:
-                        for line in dtstrackinfo:
-                            if "+ Name: " in line:
-                                ac3name = line.split("+ Name: ")[-1]
-                                ac3name = ac3name.replace("DTS", "AC3")
-                                ac3name = ac3name.replace("dts", "ac3")
-                                if args.stereo:
-                                    ac3name = ac3name.replace("5.1", "Stereo")
-                   
-                    # get aac track name
-                    aacname = False
-                    if args.aaccustom:
-                        aacname = args.aaccustom
-                    else:
-                        for line in dtstrackinfo:
-                            if "+ Name: " in line:
-                                aacname = line.split("+ Name: ")[-1]
-                                aacname = aacname.replace("DTS", "AAC")
-                                aacname = aacname.replace("dts", "aac")
-                                if args.aacstereo:
-                                    aacname = aacname.replace("5.1", "Stereo")
-
-                    # extract timecodes
-                    tctitle = "  Extracting Timecodes  [" + str(jobnum) + "/" + str(totaljobs) + "]..."
-                    jobnum += 1
-                    tccmd = [mkvextract, "timecodes_v2", ford, dtstrackid + ":" + temptcfile]
-                    runcommand(tctitle, tccmd)
-
-                    delay = False
-                    if not args.test:
-                        # get the delay if there is any
-                        fp = open(temptcfile)
-                        for i, line in enumerate(fp):
-                            if i == 1:
-                                delay = line
-                                break
-                        fp.close()
-
-                    # extract dts track
-                    extracttitle = "  Extracting DTS track  [" + str(jobnum) + "/" + str(totaljobs) + "]..."
-                    jobnum += 1
-                    extractcmd = [mkvextract, "tracks", ford, dtstrackid + ':' + tempdtsfile]
-                    runcommand(extracttitle, extractcmd)
-
-                    # convert DTS to AC3
-                    converttitle = "  Converting DTS to AC3 [" + str(jobnum) + "/" + str(totaljobs) + "]..."
-                    jobnum += 1
-                    audiochannels = 6
-                    if args.stereo:
-                        audiochannels = 2
-                    convertcmd = [ffmpeg, "-y", "-i", tempdtsfile, "-acodec", "ac3", "-ac", str(audiochannels), "-ab", "448k", tempac3file]
-                    runcommand(converttitle, convertcmd)
-                   
-                    if args.aac:
-                        converttitle = "  Converting DTS to AAC [" + str(jobnum) + "/" + str(totaljobs) + "]..."
-                        jobnum += 1
-                        audiochannels = 6
-                        if args.aacstereo:
-                            audiochannels = 2
-                        convertcmd = [ffmpeg, "-y", "-i", tempdtsfile, "-acodec", "libfaac", "-ac", str(audiochannels), "-ab", "448k", tempaacfile]
-                        runcommand(converttitle, convertcmd)
-                        if not os.path.isfile(tempaacfile) or os.path.getsize(tempaacfile) == 0:
-                            convertcmd = [ffmpeg, "-y", "-i", tempdtsfile, "-acodec", "libvo_aacenc", "-ac", str(audiochannels), "-ab", "448k", tempaacfile]
-                            runcommand(converttitle, convertcmd)
-                        if not os.path.isfile(tempaacfile) or os.path.getsize(tempaacfile) == 0:
-                            convertcmd = [ffmpeg, "-y", "-i", tempdtsfile, "-acodec", "aac", "-strict", "experimental", "-ac", str(audiochannels), "-ab", "448k", tempaacfile]
-                            runcommand(converttitle, convertcmd)
-                        if not os.path.isfile(tempaacfile) or os.path.getsize(tempaacfile) == 0:
-                            args.aac = False
-                            print "ERROR: ffmpeg can't use any aac codecs. Please try to get libfaac, libvo_aacenc, or a newer version of ffmpeg with the experimental aac codec installed"
-
-                    # Save information about current DTS track
-                    dtsinfo[dtstrackid] = {
-                      'dtsfile': tempdtsfile,
-                      'ac3file': tempac3file,
-                      'aacfile': tempaacfile,
-                      'tcfile': temptcfile,
-                      'lang': dtslang,
-                      'ac3name': ac3name,
-                      'aacname': aacname,
-                      'delay': delay
-                    }
-
-                    if args.external:
-                        if not args.test:
-                            trackIdentifier = ''
-                            if args.all_tracks and len(dtstracks) > 1:
-                                trackIdentifier = '_' + dtstrackid
-                            outputac3file = fileBaseName + trackIdentifier + '.ac3'
-                            shutil.move(tempac3file, os.path.join(dirName, outputac3file))
-                            files.append(outputac3file)
-                            if args.aac:
-                                outputaacfile = fileBaseName + trackIdentifier + '.aac'
-                                shutil.move(tempaacfile, os.path.join(dirName, outputaacfile))
-                                files.append(outputaacfile)
-
-                if not args.external:
-                    # remux
-                    remuxtitle = "  Remuxing AC3 into MKV [" + str(jobnum) + "/" + str(totaljobs) + "]..."
-                    jobnum += 1
-                    # Start to "build" command
-                    remux = [mkvmerge]
-
-                    comp = 'none'
-                    if args.compress:
-                        comp = args.compress
-
-                    # Remove subtitles
-                    if args.no_subtitles:
-                        remux.append("--no-subtitles")
-
-                    # Change the default position of the tracks if requested
-                    if args.position != 'last':
-                        remux.append("--track-order")
-                        tracklist = []
-                        if args.position == "initial":
-                            totaltracks = len(dtstracks)
-                            if args.aac:
-                                totaltracks *= 2
-                            for trackid in range(1, int(totaltracks) + 1):
-                                tracklist.append('%d:0' % trackid)
-                        elif args.position == "afterdts":
-                            currenttrack = 0
-                            for dtstrackid in dtstracks:
-                                # Tracks up to the DTS track
-                                for trackid in range(currenttrack, int(dtstrackid)):
-                                    tracklist.append('0:%d' % trackid)
-                                # DTS track
-                                if not (args.nodts or args.keepdts):
-                                    tracklist.append('0:%d' % int(dtstrackid))
-                                # AC3 track
-                                tracklist.append('1:0')
-                                # AAC track
-                                if args.aac:
-                                    tracklist.append('2:0')
-                                currenttrack = int(dtstrackid) + 1
-                            # The remaining tracks
-                            for trackid in range(currenttrack, len(audiotracks)):
-                                tracklist.append('0:%d' % trackid)
-                        remux.append(','.join(tracklist))
-
-                    # If user doesn't want the original DTS track drop it
-                    if args.nodts or args.keepdts:
-                        audiotracks = [audiotrack for audiotrack in audiotracks if audiotrack not in dtstracks]
-                        if len(audiotracks) == 0:
-                            remux.append("--no-audio")
-                        else:
-                            remux.append("--audio-tracks")
-                            remux.append(",".join(audiotracks))
-                            for tid in audiotracks:
-                                remux.append("--compression")
-                                remux.append(tid + ":" + comp)
-
-                    # Add original MKV file, set header compression scheme
-                    remux.append("--compression")
-                    remux.append(videotrackid + ":" + comp)
-                    remux.append(ford)
-
-                    # If user wants new AC3 as default then add appropriate arguments to command
-                    if args.default:
-                        remux.append("--default-track")
-                        remux.append("0:1")
-
-                    # Add parameters for each DTS track processed
-                    for dtstrackid in dtstracks:
-
-                        # Set the language
-                        remux.append("--language")
-                        remux.append("0:" + dtsinfo[dtstrackid]['lang'])
-
-                        # If the name was set for the original DTS track set it for the AC3
-                        if ac3name:
-                            remux.append("--track-name")
-                            remux.append("0:\"" + dtsinfo[dtstrackid]['ac3name'].rstrip() + "\"")
-
-                        # set delay if there is any
-                        if delay:
-                            remux.append("--sync")
-                            remux.append("0:" + dtsinfo[dtstrackid]['delay'].rstrip())
-
-                        # Set track compression scheme and append new AC3
-                        remux.append("--compression")
-                        remux.append("0:" + comp)
-                        remux.append(dtsinfo[dtstrackid]['ac3file'])
-
-                        if args.aac:
-                            # If the name was set for the original DTS track set it for the AAC
-                            if aacname:
-                                remux.append("--track-name")
-                                remux.append("0:\"" + dtsinfo[dtstrackid]['aacname'].rstrip() + "\"")
-
-                            # Set track compression scheme and append new AAC
-                            remux.append("--compression")
-                            remux.append("0:" + comp)
-                            remux.append(dtsinfo[dtstrackid]['aacfile'])
-
-                    # Declare output file
-                    remux.append("-o")
-                    remux.append(tempnewmkvfile)
-
-                    runcommand(remuxtitle, remux)
-
-                    if not args.test:
-                        if args.mp4:
-                            converttitle = "  Converting MKV to MP4 [" + str(jobnum) + "/" + str(totaljobs) + "]..."
-                            convertcmd = [ffmpeg, "-i", tempnewmkvfile, "-map", "0", "-vcodec", "copy", "-acodec", "copy", "-c:s", "mov_text", mp4file]
-                            runcommand(converttitle, convertcmd)
-                            if not args.new:
-                                silentremove(ford)
-                            silentremove(tempnewmkvfile)
-                            files.append(fileBaseName + '.mp4')
-                        else:
-                            #~ replace old mkv with new mkv
-                            if args.new:
-                                shutil.move(tempnewmkvfile, adjacentmkvfile)
-                            else:
-                                silentremove(ford)
-                                shutil.move(tempnewmkvfile, ford)
-
-                #~ clean up temp folder
-                if not args.test:
-                    if args.keepdts and not args.external:
-                        if len(dtstracks) > 1:
-                            for dtstrackid in dtstracks:
-                                outputdtsfile = fileBaseName + '_' + dtstrackid + '.dts'
-                                shutil.move(dtsinfo[dtstrackid]['dtsfile'], os.path.join(dirName, outputdtsfile))
-                                files.append(outputdtsfile)
-                        else:
-                            outputdtsfile = fileBaseName + ".dts"
-                            shutil.move(tempdtsfile, os.path.join(dirName, outputdtsfile))
-                            files.append(outputdtsfile)
-                    for dtstrackid in dtstracks:
-                        silentremove(dtsinfo[dtstrackid]['dtsfile'])
-                        silentremove(dtsinfo[dtstrackid]['ac3file'])
-                        silentremove(dtsinfo[dtstrackid]['aacfile'])
-                        silentremove(dtsinfo[dtstrackid]['tcfile'])
-                    if not os.listdir(tempdir):
-                        os.rmdir(tempdir)
-
-                #~ print out time taken
-                elapsed = (time.time() - starttime)
-                minutes = int(elapsed / 60)
-                seconds = int(elapsed) % 60
-                doprint("  " + fileName + " finished in: " + str(minutes) + " minutes " + str(seconds) + " seconds\n", 1)
-
-            return files
-
-totalstime = time.time()
-for a in args.fileordir:
-    for ford in glob.glob(a):
-        files = []
-        if os.path.isdir(ford):
-            for f in os.listdir(ford):
-                process(os.path.join(ford, f))
-        else:
-            files = process(ford)
-        destdir = False
-        if args.destdir:
-            destdir = args.destdir
-        if sab and args.sabdestdir:
-            destdir = args.sabdestdir
-        if destdir:
-            if len(files):
-                for fname in files:
-                    (dirName, fileName) = os.path.split(ford)
-                    destfile = os.path.join(destdir, fname)
-                    origfile = os.path.join(dirName, fname)
-                    if args.md5 and (find_mount_point(dirName) != find_mount_point(destdir)):
-                        if os.path.exists(destfile):
-                            if args.overwrite:
-                                silentremove(destfile)
-                                shutil.copyfile(origfile, destfile)
-                                if getmd5(origfile) == getmd5(destfile):
-                                    silentremove(origfile)
-                                else:
-                                    print "MD5's don't match."
-                            else:
-                                print "File " + destfile + " already exists"
-                        else:
-                            doprint("copying: " + origfile + " --> " + destfile + "\n", 3)
-                            shutil.copyfile(origfile, destfile)
-                            if getmd5(origfile) == getmd5(destfile):
-                                silentremove(origfile)
-                            else:
-                                print "MD5's don't match."
-                    else:
-                        if os.path.exists(destfile):
-                            if args.overwrite:
-                                silentremove(destfile)
-                                shutil.move(origfile, destfile)
-                            else:
-                                print "File " + destfile + " already exists"
-                        else:
-                            shutil.move(origfile, destfile)
-            else:
-                origpath = os.path.abspath(ford)
-                destpath = os.path.join(destdir, os.path.basename(os.path.normpath(ford)))
-                if args.md5 and (find_mount_point(origpath) != find_mount_point(destpath)):
-                    if os.path.exists(destpath) and args.overwrite:
-                        shutil.rmtree(destpath)
-                    elif os.path.exists(destpath):   
-                        print "Directory " + destpath + " already exists"
-                    else:
-                        shutil.copytree(origpath, destpath)
-                        if check_md5tree(origpath, destpath):
-                            shutil.rmtree(origpath)
-                        else:
-                            print "MD5's don't match."
-                else:
-                    shutil.move(origpath, destpath)
-                   
-if sab or nzbget:
-    sys.stdout.write("mkv dts -> ac3 conversion: " + elapsedstr(totalstime))
-else:
-    doprint("Total Time: " + elapsedstr(totalstime) + "\n", 1)
-
-if nzbget:
-    sys.exit(POSTPROCESS_SUCCESS)
 
   
 if __name__== "__main__":
