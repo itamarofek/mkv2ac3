@@ -77,32 +77,35 @@ currentFuncName = lambda n=0: sys._getframe(n + 1).f_code.co_name
 def call_prog(prog, args_list):
     cmd = [prog] + args_list
     get_logger().debug("call: %(cmd)s",{'cmd':cmd})
-    output = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()
-    if len(output) == 0 or output[0] is None:
+    output , err = subprocess.Popen(cmd,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE).communicate()
+    if not output or len(output) == 0 or output[0] is None:
         output = ""
     else:
-        output = output[0].splitlines()
-    return output
+        output = output.splitlines()
+    return output , err.splitlines()
 
 def mkvinfo(media,*arguments):
     arg_list = ["--ui-language", "en_US", media]
     if arguments:
         arg_list = list(arguments) + arg_list
-    return call_prog(mkvtools[currentFuncName()],arg_list)  
+    return call_prog(mkvtools[currentFuncName()],arg_list)
 
 
 def mkvmerge(media, *arguments):
     arg_list = ['-i', media] + [item for item in arguments]
-    return  call_prog(mkvtools[currentFuncName()], arg_list)  
+    return  call_prog(mkvtools[currentFuncName()], arg_list)
 
 
 def ffmpeg(media, *args):
-    pass
+    arg_list = ['-hide_banner', '-i', media] + [item for item in args]
+    return  call_prog(ffmpegtools[currentFuncName()], arg_list)
 
 def mkvextract(media, *args):
     arg_list = list(args)
-    arg_list = [arg_list[0], media] + arg_list[1:] 
-    return  call_prog(mkvtools[currentFuncName()], arg_list)  
+    arg_list = [arg_list[0], media] + arg_list[1:]
+    return  call_prog(mkvtools[currentFuncName()], arg_list)
 
 
 
@@ -278,12 +281,11 @@ def main():
     setup_logger(args.verbose)
 
     get_logger().info(" media is %(media)s", {'media': args.fileordir})
-    
+
     convert=AudioConvertor(args.fileordir[0], ".")
 
     convert.process_media()
 
-    
 
 def silentremove(filename):
     try:
@@ -310,10 +312,9 @@ class MediaInfo(object):
     def __init__(self,media):
         self.source = media
         self.info = dict()
-        
 
     def analyse(self):
-        output = mkvmerge(self.source)
+        output, err = mkvmerge(self.source)
         for line in output:
             entry = re.split('Track ID ([0-9]+)\: (.*) \((.*)/(.*)\)', line)
             if not entry or len(entry) != 6:
@@ -350,9 +351,9 @@ class AudioConvertor(object):
         self.tmpaudio = None
         self.src_dir, self.src_file = os.path.split(media)
         self.asset_desc = os.path.splitext(self.src_file)[0]
-  
+
     def process_audio(self):
-        info = mkvinfo(self.media.source)
+        info,err = mkvinfo(self.media.source)
         trackinfo = {}
         line_count = 0
         record_found = False
@@ -373,7 +374,6 @@ class AudioConvertor(object):
                              dict(id=self.es,info=trackinfo))
         return trackinfo
 
-        
 
     def process_media(self):
         info = self.media.analyse()
@@ -381,34 +381,64 @@ class AudioConvertor(object):
             if 'audio' in v['type'] and v['codec'] in supported_formats:
                 self.es = k
                 get_logger().info("found stream %(id)s, %(codec)s",
-                                  {'id': k, 'codec': v['codec'] }) 
+                                  {'id': k, 'codec': v['codec'] })
                 break
         stream_info = self.process_audio()
         self.extract_stream(self.es)
+        extracted_info = self.process_extracted()
         self.extract_timecode(self.es)
+        channels = (2 if self.stereo else 6)
 
+        if not stream_info['Channels'] > 5:
+            channels = 2
+        bandwidth = 640
+        if int(extracted_info['ab']) < 640:
+            bandwidth = extracted_info['ab']
+        self.convert_audio(channels, bandwidth)
+
+
+    def process_extracted(self):
+        output, err = ffmpeg(self.tmpaudio)
+        import pdb
+        #pdb.set_trace()
+        result = dict()
+        for line in err:
+            if 'Audio:' in line:
+                entry = re.split(r'\#|\,|\:|Hz|kb\/s|\(side\)', line)
+                if not len(entry) == 12:
+                   continue 
+                result['codec'] = entry[4].strip()
+                result['Hz'] = entry[5].strip()
+                result['channel'] = entry[7].strip()
+                result['ab'] = entry[10].strip()
+                break
+        return result
 
     def extract_stream(self, stream_id):
         codec = self.media.get_info()[stream_id]['codec']
         tempfile = "%s_track:%s.%s" %(self.asset_desc, stream_id, codec)
         self.tmpaudio = os.path.join(self.work_dir,tempfile)
-        result = mkvextract(self.media.source, "tracks",
+        result,err = mkvextract(self.media.source, "tracks",
                             stream_id + ':' + self.tmpaudio)
 
     def extract_timecode(self, stream_id):
         tempfile = "%s_track:%s.%s" %(self.asset_desc, stream_id, 'tc')
         self.tmptc = os.path.join(self.work_dir,tempfile)
 
-        result = mkvextract(self.media.source, "timecodes_v2",
+        result, err = mkvextract(self.media.source, "timecodes_v2",
                             stream_id + ':' + self.tmptc)
 
 
     def remux_media(self):
         pass
 
-    def convert_audio(self):
-        pass
-        
+    def convert_audio(self, channels, bandwidth, codec='ac3'):
+        tempfile = "%s_track:%s.%s" %(self.asset_desc, self.es , codec)
+        tempfile= os.path.join(self.work_dir,tempfile)
+        output, err = ffmpeg(self.tmpaudio, "-acodec", codec, 
+                             "-ac", str(channels),
+                             "-ab", "%sk" % bandwidth, tempfile)
+
 
     def mk_processing_dir(self):
         if not os.path.exists(self.work_dir):
@@ -505,7 +535,7 @@ def check_md5tree(orig, dest):
     return rt
 
 
-  
+
 if __name__== "__main__":
     main()
 
