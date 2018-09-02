@@ -88,21 +88,22 @@ def mkvinfo(media,*arguments):
     arg_list = ["--ui-language", "en_US", media]
     if arguments:
         arg_list = list(arguments) + arg_list
-    return call_prog(mkvtools[currentFuncName()],arg_list)  
+    return call_prog(mkvtools[currentFuncName()],arg_list)
 
 
 def mkvmerge(media, *arguments):
     arg_list = ['-i', media] + [item for item in arguments]
-    return  call_prog(mkvtools[currentFuncName()], arg_list)  
+    return  call_prog(mkvtools[currentFuncName()], arg_list)
 
 
 def ffmpeg(media, *args):
-    pass
+    arg_list = ['-hide_banner', '-i', media] + [item for item in arguments]
+    return  call_prog(ffmpegtools[currentFuncName()], arg_list)
 
 def mkvextract(media, *args):
     arg_list = list(args)
-    arg_list = [arg_list[0], media] + arg_list[1:] 
-    return  call_prog(mkvtools[currentFuncName()], arg_list)  
+    arg_list = [arg_list[0], media] + arg_list[1:]
+    return  call_prog(mkvtools[currentFuncName()], arg_list)
 
 
 
@@ -278,12 +279,11 @@ def main():
     setup_logger(args.verbose)
 
     get_logger().info(" media is %(media)s", {'media': args.fileordir})
-    
+
     convert=AudioConvertor(args.fileordir[0], ".")
 
     convert.process_media()
 
-    
 
 def silentremove(filename):
     try:
@@ -310,7 +310,6 @@ class MediaInfo(object):
     def __init__(self,media):
         self.source = media
         self.info = dict()
-        
 
     def analyse(self):
         output = mkvmerge(self.source)
@@ -350,7 +349,7 @@ class AudioConvertor(object):
         self.tmpaudio = None
         self.src_dir, self.src_file = os.path.split(media)
         self.asset_desc = os.path.splitext(self.src_file)[0]
-  
+
     def process_audio(self):
         info = mkvinfo(self.media.source)
         trackinfo = {}
@@ -373,7 +372,6 @@ class AudioConvertor(object):
                              dict(id=self.es,info=trackinfo))
         return trackinfo
 
-        
 
     def process_media(self):
         info = self.media.analyse()
@@ -381,12 +379,34 @@ class AudioConvertor(object):
             if 'audio' in v['type'] and v['codec'] in supported_formats:
                 self.es = k
                 get_logger().info("found stream %(id)s, %(codec)s",
-                                  {'id': k, 'codec': v['codec'] }) 
+                                  {'id': k, 'codec': v['codec'] })
                 break
         stream_info = self.process_audio()
         self.extract_stream(self.es)
+        extracted_info = self.process_extracted()
         self.extract_timecode(self.es)
+        channels = (2 if self.downmixing else 6)
+        if not stream_info[channels] > 5:
+            channels = 2
+        bandwidth = 640
+        if extracted_info['ab'] < 640:
+            bandwidth = extracted_info['ab']
+        self.convert_audio(channels, bandwidth)
 
+
+    def process_extracted(self):
+        output = ffmpeg(self.tmpaudio)
+        result = dict()
+        for line in output:
+            if 'Audio:' in line:
+                entry = re.split(r'\#|\,|\:|Hz|kb\/s|\(side\)', line)
+                if not len(entry) == 12:
+                    break
+                result['codec'] = entry[4].strip()
+                result['Hz'] = entry[5].strip()
+                result['channel'] = entry[7].strip()
+                result['ab'] = entry[10].strip()
+        return result
 
     def extract_stream(self, stream_id):
         codec = self.media.get_info()[stream_id]['codec']
@@ -406,9 +426,8 @@ class AudioConvertor(object):
     def remux_media(self):
         pass
 
-    def convert_audio(self):
+    def convert_audio(channels, bandwidth, codec='ac3'):
         pass
-        
 
     def mk_processing_dir(self):
         if not os.path.exists(self.work_dir):
@@ -505,7 +524,7 @@ def check_md5tree(orig, dest):
     return rt
 
 
-  
+
 if __name__== "__main__":
     main()
 
