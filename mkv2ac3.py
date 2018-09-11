@@ -18,10 +18,11 @@ import errno
 import logging
 import colorlog
 from distutils import spawn
+from collections import OrderedDict
 
 version = ".1"
 
-supported_formats = ['AAC', 'E-AC-3', 'DTS' ]
+supported_formats = ['AAC', 'E-AC-3', 'DTS', 'DTS-ES' ]
 mkvtools = {'mkvinfo': None, 'mkvmerge': None, 'mkvextract': None}
 mkvmerge_bin = None
 
@@ -93,8 +94,8 @@ def mkvinfo(media,*arguments):
     return call_prog(mkvtools[currentFuncName()],arg_list)
 
 
-def mkvmerge(media, *arguments):
-    arg_list = ['-i', media] + [item for item in arguments]
+def mkvmerge(*arguments):
+    arg_list = [item for item in arguments]
     return  call_prog(mkvtools[currentFuncName()], arg_list)
 
 
@@ -314,20 +315,35 @@ class MediaInfo(object):
         self.info = dict()
 
     def analyse(self):
-        output, err = mkvmerge(self.source)
+        output, err = mkvmerge('-i', self.source)
         for line in output:
-            entry = re.split('Track ID ([0-9]+)\: (.*) \((.*)/(.*)\)', line)
-            if not entry or len(entry) != 6:
+            entry = re.split('Track ID ([0-9]+)\: (.*) \((.*)\)', line)
+            #get_logger().debug("entry = %s", entry)
+            if not entry or len(entry) < 5:
                 continue
-            self.info[entry[1]] = {'type' :entry[2],
-                                   'codec_info': entry[3],
-                                   'codec': entry[4]}
+            current_id = int(entry[1])
+            self.info[current_id] = {'type' :entry[2]}
+            if 'audio' in self.info[current_id]['type']:
+                if  '/' in entry[3]:
+                    entry[3],entry[4] = entry[3].split('/')
+                elif 'DTS' in entry[4] and '-' in entry[4]:
+                    entry[4],entry[3] = entry[3].split('-')
+                else:
+                    entry[4] = entry[3]
+                if entry[4] in supported_formats:
+                    self.info[current_id]['codec_info'] = entry[3]
+                    self.info[current_id]['codec']= entry[4]
+            else:
+                self.info[current_id]['codec_info' ]= entry[4]
+                self.info[current_id]['codec'] = entry[3]
 
             get_logger().debug(
                          "parsed elementry stream %(id)s:"
                          "%(type)s, %(codec)s, %(codec_info)s",
-                         {'id': entry[1], 'type': entry[2],
-                          'codec': entry[4], 'codec_info': entry[3] })
+                         {'id': current_id,
+                          'type': self.info[current_id]['type'],
+                          'codec': self.info[current_id]['codec'] ,
+                          'codec_info': self.info[current_id]['codec_info']})
         return self.info
 
     def get_source(self):
@@ -380,7 +396,7 @@ class AudioConvertor(object):
         for k,v in info.iteritems():
             if 'audio' in v['type'] and v['codec'] in supported_formats:
                 self.es = k
-                get_logger().info("found stream %(id)s, %(codec)s",
+                get_logger().info("found stream-id %(id)s, %(codec)s",
                                   {'id': k, 'codec': v['codec'] })
                 break
         stream_info = self.process_audio()
@@ -391,10 +407,9 @@ class AudioConvertor(object):
 
         if not stream_info['Channels'] > 5:
             channels = 2
-        bandwidth = 640
-        if int(extracted_info['ab']) < 640:
-            bandwidth = extracted_info['ab']
+        bandwidth = min(640, int(extracted_info.get('ab',640)))
         self.convert_audio(channels, bandwidth)
+        self.remux_media()
 
 
     def process_extracted(self):
@@ -405,13 +420,19 @@ class AudioConvertor(object):
         for line in err:
             if 'Audio:' in line:
                 entry = re.split(r'\#|\,|\:|Hz|kb\/s|\(side\)', line)
-                if not len(entry) == 12:
-                   continue 
-                result['codec'] = entry[4].strip()
-                result['Hz'] = entry[5].strip()
-                result['channel'] = entry[7].strip()
-                result['ab'] = entry[10].strip()
-                break
+                if len(entry) == 12:
+                    result['codec'] = entry[4].strip()
+                    result['Hz'] = entry[5].strip()
+                    result['channel'] = entry[7].strip()
+                    result['ab'] = entry[10].strip()
+                    break
+                if len(entry) == 11:
+                    result['codec'] = entry[4].strip()
+                    result['Hz'] = entry[5].strip()
+                    result['channel'] = entry[7].strip()
+                    result['ab'] = entry[9].strip()
+                    break
+
         return result
 
     def extract_stream(self, stream_id):
@@ -419,25 +440,56 @@ class AudioConvertor(object):
         tempfile = "%s_track:%s.%s" %(self.asset_desc, stream_id, codec)
         self.tmpaudio = os.path.join(self.work_dir,tempfile)
         result,err = mkvextract(self.media.source, "tracks",
-                            stream_id + ':' + self.tmpaudio)
-
+                                "%s:%s" %(stream_id,self.tmpaudio))
+        
     def extract_timecode(self, stream_id):
         tempfile = "%s_track:%s.%s" %(self.asset_desc, stream_id, 'tc')
         self.tmptc = os.path.join(self.work_dir,tempfile)
 
         result, err = mkvextract(self.media.source, "timecodes_v2",
-                            stream_id + ':' + self.tmptc)
+                                 "%s:%s" % (stream_id,self.tmptc))
 
 
     def remux_media(self):
-        pass
+        other_audio_ids = []
+        other_audio = None
+        track_ids = list()
+        for es_id,val in self.media.get_info().items():
+            if es_id != self.es:
+                track_ids.append("0:%s" % es_id)
+                if 'audio' in val['type']:
+                    other_audio_ids.append(str(es_id))
+            else:
+                track_ids += ['1:0']
+
+        if len(other_audio_ids) > 1:
+            other_audio = ['-a']  + [','.join(other_audio_ids)]
+
+        if not self.target:
+            target = "%s_new.mkv" %(self.asset_desc)
+            self.target = os.path.join(self.work_dir,target)
+
+    
+        track_order = ['--track-order' ,",".join(track_ids) ]
+
+        extra_args = [] 
+        if other_audio:
+            extra_args += other_audio
+        else:
+            extra_args.append('-A')
+        extra_args += [self.media.source]
+        extra_args += [ '--default-track', '0:1', self.temp_new_audio]
+        extra_args += track_order
+        out, err = mkvmerge('-o', self.target, *extra_args)
+        
 
     def convert_audio(self, channels, bandwidth, codec='ac3'):
         tempfile = "%s_track:%s.%s" %(self.asset_desc, self.es , codec)
-        tempfile= os.path.join(self.work_dir,tempfile)
+        self.temp_new_audio= os.path.join(self.work_dir,tempfile)
         output, err = ffmpeg(self.tmpaudio, "-acodec", codec, 
                              "-ac", str(channels),
-                             "-ab", "%sk" % bandwidth, tempfile)
+                             "-ab", "%sk" % bandwidth,
+                             self.temp_new_audio)
 
 
     def mk_processing_dir(self):
