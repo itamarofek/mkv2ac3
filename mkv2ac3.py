@@ -22,7 +22,7 @@ from collections import OrderedDict
 
 version = ".1"
 
-supported_formats = ['AAC', 'E-AC-3', 'DTS', 'DTS-ES' ]
+supported_formats = ['AAC', 'EAC3', 'E-AC-3', 'DTS', 'DTS-ES' ]
 mkvtools = {'mkvinfo': None, 'mkvmerge': None, 'mkvextract': None}
 mkvmerge_bin = None
 
@@ -77,7 +77,7 @@ currentFuncName = lambda n=0: sys._getframe(n + 1).f_code.co_name
 
 def call_prog(prog, args_list):
     cmd = [prog] + args_list
-    get_logger().debug("call: %(cmd)s",{'cmd':cmd})
+    get_logger().debug("call: %(cmd)s",{'cmd':" ".join(cmd)})
     output , err = subprocess.Popen(cmd,
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE).communicate()
@@ -346,17 +346,48 @@ class MediaInfo(object):
                           'codec_info': self.info[current_id]['codec_info']})
         return self.info
 
-    def get_source(self):
-        return self.source
 
-    def get_info(self):
+class MediaInfo2(object):
+    def __init__(self,media):
+        self.source = media
+        self.info = dict()
+
+    def analyse(self):
+        output, err = ffmpeg(self.source)
+        for line in err:
+            if '   Stream #' in line:
+                entry = re.split(r'\s+|\:|\(|\)|\#|\,',line)
+
+                current_id = int(entry[4])
+                if 'Video' in line:
+                    index = entry.index('Video')
+                    self.info[current_id] = dict(type='video',
+                                                 codec=entry[index+2].upper(),
+                                                 codec_info=None)
+                elif 'Audio' in line:
+                    index = entry.index('Audio')
+                    self.info[current_id] = dict(type=entry[index].lower(),
+                                                 codec=entry[index+2].upper(),
+                                                 codec_info=None)
+                elif 'Subtitle' in line:
+                    index = entry.index('Subtitle')
+                    self.info[current_id] = dict(type=entry[index].lower(),
+                                                 codec=entry[index+2].upper(),
+                                                 codec_info=None)
+
+                
+                get_logger().debug("parsed elementry stream %(id)s:"
+                         "%(type)s, %(codec)s, %(codec_info)s",
+                         {'id': current_id,
+                          'type': self.info[current_id]['type'],
+                          'codec': self.info[current_id]['codec'] ,
+                          'codec_info': self.info[current_id]['codec_info']})
         return self.info
-
 
 class AudioConvertor(object):
 
     def __init__(self, media, work_dir=".", target=None, downmixing=False):
-        self.media = MediaInfo(media)
+        self.media = MediaInfo2(media)
         self.src_dir = None
         self.src_file = None
         self.asset_desc = None
@@ -369,6 +400,9 @@ class AudioConvertor(object):
         self.asset_desc = os.path.splitext(self.src_file)[0]
 
     def process_audio(self):
+        if not self.es:
+            get_logger().info("No supported audio track found!")
+            return None
         info,err = mkvinfo(self.media.source)
         trackinfo = {}
         line_count = 0
@@ -400,6 +434,10 @@ class AudioConvertor(object):
                                   {'id': k, 'codec': v['codec'] })
                 break
         stream_info = self.process_audio()
+        
+        if not stream_info:
+            return
+
         self.extract_stream(self.es)
         extracted_info = self.process_extracted()
         self.extract_timecode(self.es)
@@ -436,7 +474,7 @@ class AudioConvertor(object):
         return result
 
     def extract_stream(self, stream_id):
-        codec = self.media.get_info()[stream_id]['codec']
+        codec = self.media.info[stream_id]['codec']
         tempfile = "%s_track:%s.%s" %(self.asset_desc, stream_id, codec)
         self.tmpaudio = os.path.join(self.work_dir,tempfile)
         result,err = mkvextract(self.media.source, "tracks",
@@ -454,13 +492,13 @@ class AudioConvertor(object):
         other_audio_ids = []
         other_audio = None
         track_ids = list()
-        for es_id,val in self.media.get_info().items():
+        for es_id,val in self.media.info.items():
             if es_id != self.es:
-                track_ids.append("0:%s" % es_id)
+                track_ids.append("1:%s" % es_id)
                 if 'audio' in val['type']:
                     other_audio_ids.append(str(es_id))
             else:
-                track_ids += ['1:0']
+                track_ids += ['0:0']
 
         if len(other_audio_ids) > 1:
             other_audio = ['-a']  + [','.join(other_audio_ids)]
@@ -472,13 +510,13 @@ class AudioConvertor(object):
     
         track_order = ['--track-order' ,",".join(track_ids) ]
 
-        extra_args = [] 
+        extra_args = [ '--default-track', '0:1', self.temp_new_audio]
+
         if other_audio:
             extra_args += other_audio
         else:
             extra_args.append('-A')
         extra_args += [self.media.source]
-        extra_args += [ '--default-track', '0:1', self.temp_new_audio]
         extra_args += track_order
         out, err = mkvmerge('-o', self.target, *extra_args)
         
