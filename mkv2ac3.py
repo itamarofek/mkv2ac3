@@ -75,8 +75,8 @@ def set_tools_path(tools, path=None):
 
 currentFuncName = lambda n=0: sys._getframe(n + 1).f_code.co_name
 
-def call_prog(prog, args_list):
-    cmd = [prog] + args_list
+def call_prog(prog, *args_list):
+    cmd = [prog] + list(args_list)
     get_logger().debug("call: %(cmd)s",{'cmd':" ".join(cmd)})
     output , err = subprocess.Popen(cmd,
                                     stdout=subprocess.PIPE,
@@ -87,26 +87,26 @@ def call_prog(prog, args_list):
         output = output.splitlines()
     return output , err.splitlines()
 
-def mkvinfo(media,*arguments):
+def mkvinfo(media, *arguments):
     arg_list = ["--ui-language", "en_US", media]
     if arguments:
         arg_list = list(arguments) + arg_list
-    return call_prog(mkvtools[currentFuncName()],arg_list)
+    return call_prog(mkvtools[currentFuncName()], *arg_list)
 
 
 def mkvmerge(*arguments):
     arg_list = [item for item in arguments]
-    return  call_prog(mkvtools[currentFuncName()], arg_list)
+    return  call_prog(mkvtools[currentFuncName()], *arg_list)
 
 
 def ffmpeg(media, *args):
     arg_list = ['-hide_banner', '-i', media] + [item for item in args]
-    return  call_prog(ffmpegtools[currentFuncName()], arg_list)
+    return  call_prog(ffmpegtools[currentFuncName()], *arg_list)
 
 def mkvextract(media, *args):
     arg_list = list(args)
     arg_list = [arg_list[0], media] + arg_list[1:]
-    return  call_prog(mkvtools[currentFuncName()], arg_list)
+    return  call_prog(mkvtools[currentFuncName()], *arg_list)
 
 
 
